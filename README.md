@@ -31,6 +31,7 @@ pip install -r requirements.txt
 ```
 
 3. **Configure your API key** (recommended):
+   **Local dev (.env):**
    - Open the `.env` file
    - Replace `your_api_key_here` with your actual Marketcheck API key
    - Save the file
@@ -40,7 +41,13 @@ pip install -r requirements.txt
    MARKETCHECK_API_KEY=abc123xyz456
    ```
 
-   The app reads the key **only** from `.env` (it is not entered in the UI).
+   **Streamlit Cloud (Secrets):**
+   - In your Streamlit app settings → **Secrets**, add:
+     ```
+     MARKETCHECK_API_KEY = "abc123xyz456"
+     ```
+
+   The app reads the key from **Streamlit Secrets first**, then falls back to `.env` for local dev. It is never entered in the UI.
 
 ## Usage
 

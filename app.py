@@ -383,8 +383,9 @@ def main():
     # Initialize session state
     init_session_state()
 
-    # API key is loaded ONLY from environment (.env via dotenv). Never accept from UI.
-    api_key = os.getenv("MARKETCHECK_API_KEY", "").strip()
+    # API key is never accepted from UI. Prefer Streamlit Secrets (Cloud),
+    # and fall back to env var (.env via python-dotenv) for local dev.
+    api_key = (st.secrets.get("MARKETCHECK_API_KEY", "") or os.getenv("MARKETCHECK_API_KEY", "")).strip()
     
     # Title
     st.title("🚗 Marketcheck Comparables App")
@@ -396,8 +397,8 @@ def main():
         st.header("Search Parameters")
 
         if not api_key:
-            st.error("Missing API key. Set `MARKETCHECK_API_KEY` in your `.env` file.")
-            st.caption("Example: MARKETCHECK_API_KEY=abc123xyz456")
+            st.error("Missing API key. Set `MARKETCHECK_API_KEY` in Streamlit Secrets (Cloud) or `.env` (local).")
+            st.caption("Example (Secrets): MARKETCHECK_API_KEY = \"abc123xyz456\"")
             st.markdown("---")
         
         # VIN input
@@ -413,7 +414,7 @@ def main():
         # Handle VIN decode
         if decode_button:
             if not api_key:
-                st.error("⚠️ Missing API key. Set `MARKETCHECK_API_KEY` in `.env`.")
+                st.error("⚠️ Missing API key. Set `MARKETCHECK_API_KEY` in Streamlit Secrets (Cloud) or `.env` (local).")
             elif not vin or len(vin) != 17:
                 st.error("⚠️ Please enter a valid 17-character VIN.")
             else:
@@ -603,7 +604,7 @@ def main():
         
         if search_disabled:
             if not api_key:
-                st.caption("Set `MARKETCHECK_API_KEY` in `.env` to enable search")
+                st.caption("Set `MARKETCHECK_API_KEY` in Streamlit Secrets (Cloud) or `.env` (local) to enable search")
             else:
                 st.caption("Decode VIN first to enable search")
     
@@ -611,7 +612,7 @@ def main():
     if search_button and st.session_state.decoded_vehicle:
         # Validation
         if not api_key:
-            st.error("⚠️ Missing API key. Set `MARKETCHECK_API_KEY` in `.env`.")
+            st.error("⚠️ Missing API key. Set `MARKETCHECK_API_KEY` in Streamlit Secrets (Cloud) or `.env` (local).")
             return
         
         # Get decoded vehicle info from session state
@@ -803,7 +804,7 @@ def main():
         # Initial state - show instructions
         st.info(
             "👈 **Get Started:**\n\n"
-            "1. Set `MARKETCHECK_API_KEY` in your `.env` file\n"
+            "1. Set `MARKETCHECK_API_KEY` in Streamlit Secrets (Cloud) or `.env` (local)\n"
             "2. Enter the vehicle's VIN\n"
             "3. Click **🔎 Decode VIN** to load vehicle info and filter options\n"
             "4. Optionally enter mileage and select filters from dropdowns\n"
