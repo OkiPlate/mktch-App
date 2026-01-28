@@ -9,10 +9,10 @@ A real-time market analysis tool for used cars built with Streamlit and the Mark
 - **Dual Search Modes**:
   - **Strict Match**: High precision with exact year, make, model, trim (no mileage restriction)
   - **Lenient Match**: Broader results with +/- 1 year range, all trims, and optional mileage range (+/- 30%)
-- **Advanced Filters**:
-  - **Trim**: Filter by specific trim level
-  - **Engine**: Filter by engine type (e.g., 2.0L I4, 3.5L V6)
-  - **Transmission**: Filter by Automatic or Manual
+- **Dynamic Filters** (populated via Auto-Complete API):
+  - **Trim**: Dropdown with available trims and inventory counts
+  - **Engine**: Dropdown with available engines and inventory counts
+  - **Transmission**: Dropdown with transmission types and inventory counts
 - **Location-Based Search**:
   - **ZIP Code**: Search near a specific location
   - **Radius**: Configurable search radius (10-500 miles)
@@ -40,7 +40,7 @@ pip install -r requirements.txt
    MARKETCHECK_API_KEY=abc123xyz456
    ```
 
-   Alternatively, you can enter the API key directly in the app's sidebar.
+   The app reads the key **only** from `.env` (it is not entered in the UI).
 
 ## Usage
 
@@ -50,13 +50,13 @@ streamlit run app.py
 ```
 
 2. **In the app**:
-   - Enter your Marketcheck API key (get one at [marketcheck.com](https://www.marketcheck.com))
    - Input the 17-character VIN
+   - Click **"Decode VIN"** to load vehicle info and filter options
    - Optionally enter the vehicle's current mileage
    - Choose your search mode (Strict or Lenient)
-   - (Optional) Expand "Advanced Filters" to filter by trim, engine, or transmission
+   - (Optional) Select from dynamic filter dropdowns (Trim, Engine, Transmission)
    - (Optional) Expand "Location Filters" to search by ZIP code and radius
-   - Click "Find Comps" to see results
+   - Click **"Find Comps"** to see results
 
 ## Requirements
 

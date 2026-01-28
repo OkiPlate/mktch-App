@@ -9,6 +9,7 @@ import pandas as pd
 import requests
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables from .env file
 load_dotenv()
@@ -17,6 +18,111 @@ load_dotenv()
 # ============================================================================
 # API FUNCTIONS
 # ============================================================================
+
+def fetch_autocomplete_options(
+    api_key: str,
+    field: str,
+    make: str,
+    model: str,
+    year: Optional[int] = None,
+    input_text: str = ""
+) -> List[Dict]:
+    """
+    Fetch auto-complete suggestions from Marketcheck API.
+    
+    Args:
+        api_key: Marketcheck API key
+        field: Field to autocomplete (trim, engine, transmission)
+        make: Vehicle make
+        model: Vehicle model
+        year: Vehicle year (optional)
+        input_text: Text input for filtering (empty for all options)
+        
+    Returns:
+        List of dicts with 'item' and 'count' keys, or empty list on error
+    """
+    url = "https://api.marketcheck.com/v2/search/car/auto-complete"
+    
+    params = {
+        "api_key": api_key,
+        "field": field,
+        "input": input_text,
+        "make": make,
+        "model": model,
+        "term_counts": "true",
+        "car_type": "used"
+    }
+    
+    # Add year for more specific results (except transmission which is less year-dependent)
+    if year and field != "transmission":
+        params["year"] = str(year)
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Response format with term_counts=true: {"terms": [{"item": "...", "count": N}, ...]}
+        terms = data.get('terms', [])
+        
+        # Handle both formats (with and without counts)
+        if terms and isinstance(terms[0], dict):
+            # Sort by count descending
+            return sorted(terms, key=lambda x: x.get('count', 0), reverse=True)
+        elif terms and isinstance(terms[0], str):
+            # Simple string array
+            return [{"item": t, "count": 0} for t in terms]
+        return []
+    except requests.exceptions.RequestException as e:
+        # Silently fail - we'll just show empty dropdown or text input
+        return []
+
+
+def fetch_all_autocomplete_options(
+    api_key: str,
+    make: str,
+    model: str,
+    year: int
+) -> Dict[str, List[Dict]]:
+    """
+    Fetch all autocomplete options (trim, engine, transmission) in parallel.
+    
+    Args:
+        api_key: Marketcheck API key
+        make: Vehicle make
+        model: Vehicle model
+        year: Vehicle year
+        
+    Returns:
+        Dictionary with keys 'trim', 'engine', 'transmission' containing lists of options
+    """
+    results = {
+        "trim": [],
+        "engine": [],
+        "transmission": []
+    }
+    
+    fields = ["trim", "engine", "transmission"]
+    
+    # Fetch all options in parallel for better performance
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_field = {
+            executor.submit(
+                fetch_autocomplete_options, 
+                api_key, field, make, model, year, ""
+            ): field 
+            for field in fields
+        }
+        
+        for future in as_completed(future_to_field):
+            field = future_to_field[future]
+            try:
+                results[field] = future.result()
+            except Exception:
+                results[field] = []
+    
+    return results
+
 
 def decode_vin(vin: str, api_key: str) -> Optional[Dict]:
     """
@@ -254,6 +360,16 @@ def parse_listings(search_response: Dict) -> pd.DataFrame:
 # STREAMLIT UI
 # ============================================================================
 
+def init_session_state():
+    """Initialize session state variables."""
+    if 'decoded_vehicle' not in st.session_state:
+        st.session_state.decoded_vehicle = None
+    if 'autocomplete_options' not in st.session_state:
+        st.session_state.autocomplete_options = None
+    if 'last_vin' not in st.session_state:
+        st.session_state.last_vin = None
+
+
 def main():
     """Main Streamlit application."""
     
@@ -264,6 +380,12 @@ def main():
         layout="wide"
     )
     
+    # Initialize session state
+    init_session_state()
+
+    # API key is loaded ONLY from environment (.env via dotenv). Never accept from UI.
+    api_key = os.getenv("MARKETCHECK_API_KEY", "").strip()
+    
     # Title
     st.title("🚗 Marketcheck Comparables App")
     st.markdown("*Real-time market analysis tool for used cars*")
@@ -272,17 +394,11 @@ def main():
     # Sidebar for inputs
     with st.sidebar:
         st.header("Search Parameters")
-        
-        # API Key input - pre-populate from .env if available
-        default_api_key = os.getenv("MARKETCHECK_API_KEY", "")
-        api_key = st.text_input(
-            "Marketcheck API Key",
-            value=default_api_key,
-            type="password",
-            help="Enter your Marketcheck API key (or set MARKETCHECK_API_KEY in .env)"
-        )
-        
-        st.markdown("---")
+
+        if not api_key:
+            st.error("Missing API key. Set `MARKETCHECK_API_KEY` in your `.env` file.")
+            st.caption("Example: MARKETCHECK_API_KEY=abc123xyz456")
+            st.markdown("---")
         
         # VIN input
         vin = st.text_input(
@@ -290,6 +406,53 @@ def main():
             max_chars=17,
             help="Enter the 17-character VIN"
         ).strip().upper()
+        
+        # Decode VIN button
+        decode_button = st.button("🔎 Decode VIN", use_container_width=True)
+        
+        # Handle VIN decode
+        if decode_button:
+            if not api_key:
+                st.error("⚠️ Missing API key. Set `MARKETCHECK_API_KEY` in `.env`.")
+            elif not vin or len(vin) != 17:
+                st.error("⚠️ Please enter a valid 17-character VIN.")
+            else:
+                with st.spinner("Decoding VIN and loading options..."):
+                    # Decode VIN
+                    decode_response = decode_vin(vin, api_key)
+                    
+                    if decode_response:
+                        try:
+                            make, model, trim, year = extract_vehicle_info(decode_response)
+                            st.session_state.decoded_vehicle = {
+                                'make': make,
+                                'model': model,
+                                'trim': trim,
+                                'year': year,
+                                'vin': vin
+                            }
+                            st.session_state.last_vin = vin
+                            
+                            # Fetch autocomplete options in parallel
+                            st.session_state.autocomplete_options = fetch_all_autocomplete_options(
+                                api_key, make, model, year
+                            )
+                            st.success(f"✅ Decoded: {year} {make} {model} {trim}")
+                        except Exception as e:
+                            st.error(f"❌ Error parsing vehicle: {str(e)}")
+                            st.session_state.decoded_vehicle = None
+                            st.session_state.autocomplete_options = None
+                    else:
+                        st.error("❌ Failed to decode VIN.")
+                        st.session_state.decoded_vehicle = None
+                        st.session_state.autocomplete_options = None
+        
+        # Clear session if VIN changed manually
+        if vin != st.session_state.last_vin and st.session_state.last_vin is not None:
+            st.session_state.decoded_vehicle = None
+            st.session_state.autocomplete_options = None
+        
+        st.markdown("---")
         
         # Mileage input
         mileage = st.number_input(
@@ -317,32 +480,88 @@ def main():
         
         st.markdown("---")
         
-        # Advanced Filters Section
-        with st.expander("🔧 Advanced Filters", expanded=False):
-            # Trim filter
-            trim_filter = st.text_input(
-                "Trim",
-                help="Filter by specific trim level (e.g., EX, Limited, SX)"
-            ).strip()
-            if not trim_filter:
-                trim_filter = None
+        # Advanced Filters Section - Dynamic dropdowns after VIN decode
+        filters_expanded = st.session_state.decoded_vehicle is not None
+        with st.expander("🔧 Advanced Filters", expanded=filters_expanded):
             
-            # Engine filter
-            engine_filter = st.text_input(
-                "Engine",
-                help="Filter by engine type (e.g., 2.0L I4, 3.5L V6)"
-            ).strip()
-            if not engine_filter:
-                engine_filter = None
+            # Get autocomplete options from session state
+            ac_options = st.session_state.autocomplete_options or {}
             
-            # Transmission filter
-            transmission_filter = st.selectbox(
-                "Transmission",
-                options=["Any", "Automatic", "Manual"],
-                help="Filter by transmission type"
-            )
-            if transmission_filter == "Any":
-                transmission_filter = None
+            # Trim dropdown
+            trim_options = ac_options.get('trim', [])
+            if trim_options:
+                trim_choices = ["Any"] + [
+                    f"{opt['item']} ({opt['count']})" if opt.get('count', 0) > 0 else opt['item']
+                    for opt in trim_options
+                ]
+                trim_selected = st.selectbox(
+                    "Trim",
+                    options=trim_choices,
+                    help="Filter by specific trim level"
+                )
+                # Extract just the trim name (remove count)
+                if trim_selected != "Any":
+                    trim_filter = trim_selected.split(" (")[0]
+                else:
+                    trim_filter = None
+            else:
+                # Fallback to text input if no options available
+                trim_input = st.text_input(
+                    "Trim",
+                    help="Decode VIN first to see available trims, or enter manually"
+                ).strip()
+                trim_filter = trim_input if trim_input else None
+            
+            # Engine dropdown
+            engine_options = ac_options.get('engine', [])
+            if engine_options:
+                engine_choices = ["Any"] + [
+                    f"{opt['item']} ({opt['count']})" if opt.get('count', 0) > 0 else opt['item']
+                    for opt in engine_options
+                ]
+                engine_selected = st.selectbox(
+                    "Engine",
+                    options=engine_choices,
+                    help="Filter by engine type"
+                )
+                # Extract just the engine name (remove count)
+                if engine_selected != "Any":
+                    engine_filter = engine_selected.split(" (")[0]
+                else:
+                    engine_filter = None
+            else:
+                # Fallback to text input if no options available
+                engine_input = st.text_input(
+                    "Engine",
+                    help="Decode VIN first to see available engines, or enter manually"
+                ).strip()
+                engine_filter = engine_input if engine_input else None
+            
+            # Transmission dropdown
+            transmission_options = ac_options.get('transmission', [])
+            if transmission_options:
+                trans_choices = ["Any"] + [
+                    f"{opt['item']} ({opt['count']})" if opt.get('count', 0) > 0 else opt['item']
+                    for opt in transmission_options
+                ]
+                trans_selected = st.selectbox(
+                    "Transmission",
+                    options=trans_choices,
+                    help="Filter by transmission type"
+                )
+                # Extract just the transmission name (remove count)
+                if trans_selected != "Any":
+                    transmission_filter = trans_selected.split(" (")[0]
+                else:
+                    transmission_filter = None
+            else:
+                # Fallback to basic dropdown
+                trans_selected = st.selectbox(
+                    "Transmission",
+                    options=["Any", "Automatic", "Manual"],
+                    help="Filter by transmission type"
+                )
+                transmission_filter = trans_selected if trans_selected != "Any" else None
         
         st.markdown("---")
         
@@ -373,40 +592,39 @@ def main():
         
         st.markdown("---")
         
-        # Search button
-        search_button = st.button("🔍 Find Comps", type="primary", use_container_width=True)
+        # Search button - only enabled if VIN is decoded
+        search_disabled = (not api_key) or (st.session_state.decoded_vehicle is None)
+        search_button = st.button(
+            "🔍 Find Comps", 
+            type="primary", 
+            use_container_width=True,
+            disabled=search_disabled
+        )
+        
+        if search_disabled:
+            if not api_key:
+                st.caption("Set `MARKETCHECK_API_KEY` in `.env` to enable search")
+            else:
+                st.caption("Decode VIN first to enable search")
     
     # Main content area
-    if search_button:
+    if search_button and st.session_state.decoded_vehicle:
         # Validation
         if not api_key:
-            st.error("⚠️ Please enter your Marketcheck API key in the sidebar.")
+            st.error("⚠️ Missing API key. Set `MARKETCHECK_API_KEY` in `.env`.")
             return
         
-        if not vin or len(vin) != 17:
-            st.error("⚠️ Please enter a valid 17-character VIN.")
-            return
-        
-        # Step 1: Decode VIN
-        with st.spinner("Decoding VIN..."):
-            decode_response = decode_vin(vin, api_key)
-        
-        if not decode_response:
-            st.error("❌ Failed to decode VIN. Please check the VIN and API key.")
-            return
-        
-        # Extract vehicle information
-        try:
-            make, model, trim, year = extract_vehicle_info(decode_response)
-        except Exception as e:
-            st.error(f"❌ Error parsing vehicle information: {str(e)}")
-            st.json(decode_response)  # Show raw response for debugging
-            return
+        # Get decoded vehicle info from session state
+        vehicle = st.session_state.decoded_vehicle
+        make = vehicle['make']
+        model = vehicle['model']
+        trim = vehicle['trim']
+        year = vehicle['year']
         
         # Display decoded vehicle
-        st.success(f"✅ Vehicle Decoded: **{year} {make} {model} {trim}**")
+        st.success(f"✅ Vehicle: **{year} {make} {model} {trim}**")
         
-        # Step 2: Search for comparables
+        # Search for comparables
         with st.spinner(f"Searching for comparables ({search_mode})..."):
             search_response = search_comps(
                 api_key=api_key,
@@ -433,7 +651,7 @@ def main():
         if df.empty:
             st.warning(
                 "⚠️ No comparables found. "
-                "Try switching to **Lenient Match** for broader results."
+                "Try switching to **Lenient Match** or adjusting filters."
             )
             return
         
@@ -533,21 +751,64 @@ def main():
         st.download_button(
             label="📥 Download CSV",
             data=csv,
-            file_name=f"marketcheck_comps_{vin}_{year}_{make}_{model}.csv",
+            file_name=f"marketcheck_comps_{vehicle['vin']}_{year}_{make}_{model}.csv",
             mime="text/csv"
         )
+    
+    elif st.session_state.decoded_vehicle:
+        # VIN decoded but not searched yet - show vehicle info and available options
+        vehicle = st.session_state.decoded_vehicle
+        st.info(
+            f"**Vehicle Decoded:** {vehicle['year']} {vehicle['make']} {vehicle['model']} {vehicle['trim']}\n\n"
+            "Configure your filters in the sidebar, then click **🔍 Find Comps** to search."
+        )
+        
+        # Show available options summary
+        ac_options = st.session_state.autocomplete_options
+        if ac_options:
+            st.markdown("### 📋 Available Market Options for This Vehicle")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.markdown("**Trims:**")
+                trim_opts = ac_options.get('trim', [])[:10]
+                if trim_opts:
+                    for opt in trim_opts:
+                        count = opt.get('count', 0)
+                        st.caption(f"• {opt['item']} ({count} listings)")
+                else:
+                    st.caption("No trim data available")
+            
+            with col2:
+                st.markdown("**Engines:**")
+                engine_opts = ac_options.get('engine', [])[:10]
+                if engine_opts:
+                    for opt in engine_opts:
+                        count = opt.get('count', 0)
+                        st.caption(f"• {opt['item']} ({count} listings)")
+                else:
+                    st.caption("No engine data available")
+            
+            with col3:
+                st.markdown("**Transmissions:**")
+                trans_opts = ac_options.get('transmission', [])[:10]
+                if trans_opts:
+                    for opt in trans_opts:
+                        count = opt.get('count', 0)
+                        st.caption(f"• {opt['item']} ({count} listings)")
+                else:
+                    st.caption("No transmission data available")
     
     else:
         # Initial state - show instructions
         st.info(
             "👈 **Get Started:**\n\n"
-            "1. Enter your Marketcheck API key in the sidebar\n"
+            "1. Set `MARKETCHECK_API_KEY` in your `.env` file\n"
             "2. Enter the vehicle's VIN\n"
-            "3. Optionally enter the current mileage\n"
-            "4. Choose a search mode (Strict or Lenient)\n"
-            "5. Use Advanced Filters to narrow by trim, engine, or transmission\n"
-            "6. Use Location Filters to search by ZIP code and radius\n"
-            "7. Click '🔍 Find Comps' to analyze the market"
+            "3. Click **🔎 Decode VIN** to load vehicle info and filter options\n"
+            "4. Optionally enter mileage and select filters from dropdowns\n"
+            "5. Choose a search mode (Strict or Lenient)\n"
+            "6. Click **🔍 Find Comps** to analyze the market"
         )
         
         # Show feature comparison
@@ -573,24 +834,15 @@ def main():
         
         # Show filter options
         st.markdown("---")
-        st.markdown("### 🔧 Available Filters")
-        col1, col2 = st.columns(2)
+        st.markdown("### 🔧 Dynamic Filters")
+        st.markdown("""
+        After decoding a VIN, the app automatically fetches available options from the market:
         
-        with col1:
-            st.markdown("""
-            **Advanced Filters:**
-            - **Trim** - Filter by specific trim level
-            - **Engine** - Filter by engine type (e.g., 3.5L V6)
-            - **Transmission** - Automatic or Manual
-            """)
-        
-        with col2:
-            st.markdown("""
-            **Location Filters:**
-            - **ZIP Code** - Search near a specific location
-            - **Radius** - Set search radius (10-500 miles)
-            - Results sorted by distance when location is set
-            """)
+        - **Trim** - Dropdown with all available trims and inventory counts
+        - **Engine** - Dropdown with all available engines and inventory counts  
+        - **Transmission** - Dropdown with transmission types and inventory counts
+        - **Location** - Search by ZIP code with configurable radius
+        """)
 
 
 if __name__ == "__main__":
